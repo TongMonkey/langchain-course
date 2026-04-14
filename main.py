@@ -7,7 +7,7 @@ load_dotenv()
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 
 from langchain_tavily import TavilySearch
 
@@ -22,11 +22,17 @@ class AgentResponse(BaseModel):
     sources: List[Source] = Field(description="The list of sources to generate the answer")
 
 
-llm = ChatOpenAI(
+api_version = os.getenv("AZURE_OPENAI_API_VERSION") or os.getenv(
+    "OPENAI_API_VERSION", "2024-12-01-preview"
+)
+
+llm = AzureChatOpenAI(
     temperature=0.6,
-    model="glm-4.6",
-    openai_api_key=os.getenv("ZAI_API_KEY"),
-    openai_api_base="https://open.bigmodel.cn/api/paas/v4/",
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    openai_api_key=os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+    api_version=api_version,
+    model=os.getenv("AZURE_OPENAI_MODEL_NAME", "gpt-5.4-mini"),
 )
 
 tools = [TavilySearch()]
