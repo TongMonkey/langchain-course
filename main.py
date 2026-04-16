@@ -1,111 +1,179 @@
 import os
+from operator import itemgetter
+from textwrap import dedent
 
 from dotenv import load_dotenv
-
-from langchain_core.prompts import PromptTemplate
-
-from langchain_openai import AzureChatOpenAI
-
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 
 
 load_dotenv()
 
+print("Initializing components...")
+
+embeddings = AzureOpenAIEmbeddings(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/"),
+    openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+    azure_deployment=os.environ["AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT"],
+)
+
+llm = AzureChatOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/"),
+    openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+    azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
+)
+
+vector_store = PineconeVectorStore(
+    index_name=os.environ["INDEX_NAME"],
+    embedding=embeddings,
+)
+
+retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        (
+            "human",
+            dedent(
+                """
+                Answer the question based on the following context:
+
+                {context}
+
+                Question: {question}
+
+                Provide a detailed answer.
+                """
+            ).strip(),
+        ),
+    ]
+)
 
 
+def format_docs(docs):
+    """Format the documents to a string"""
+    return "\n\n".join([doc.page_content for doc in docs])
 
 
-def main():
-
-    print("Hello from langchain-course!")
-
-    information = """
-
-    Elon Reeve Musk (/ˈiːlɒn/ EE-lon; born June 28, 1971) is a businessman and entrepreneur known for his leadership of Tesla, SpaceX, X, and xAI. Musk has been the wealthiest person in the world since 2025; as of April 2026, Forbes estimates his net worth to be US$809 billion.
-
-
-
-Born into a wealthy family in Pretoria, South Africa, Musk emigrated in 1989 to Canada; he has Canadian citizenship since his mother was born there. He received bachelor's degrees in 1997 from the University of Pennsylvania before moving to California to pursue business ventures. In 1995, Musk co-founded the software company Zip2. Following its sale in 1999, he co-founded X.com, an online payment company that later merged to form PayPal, which was acquired by eBay in 2002. Musk also became an American citizen in 2002.
-
-
-
-In 2002, Musk founded the space technology company SpaceX, becoming its CEO and chief engineer; the company has since led innovations in reusable rockets and commercial spaceflight. Musk joined the automaker Tesla as an early investor in 2004 and became its CEO and product architect in 2008; it has since become a leader in electric vehicles. In 2015, he co-founded OpenAI to advance artificial intelligence (AI) research, but later left; growing discontent with the organization's direction and leadership in the AI boom in the 2020s led him to establish xAI, which became a subsidiary of SpaceX in 2026. In 2022, he acquired the social network Twitter, implementing significant changes, and rebranding it as X in 2023. His other businesses include the neurotechnology company Neuralink, which he co-founded in 2016, and the tunneling company the Boring Company, which he founded in 2017. In November 2025, a Tesla pay package worth $1 trillion for Musk was approved, which he is to receive over 10 years if he meets specific goals.
-
-
-
-Musk is a supporter of global far-right figures, causes, and political parties. He was the largest donor in the 2024 U.S. presidential election, where Musk supported Donald Trump. After Trump was inaugurated as president in January 2025, Musk served as Senior Advisor to the President and as the de facto head of the Department of Government Efficiency (DOGE). Shortly before a public feud with Trump, Musk left the Trump administration in May 2025 and returned to managing his companies.
-
-
-
-His political activities, views, and statements have made Musk a polarizing figure. Musk has been criticized for COVID-19 misinformation, promoting conspiracy theories, and affirming antisemitic, racist, and transphobic comments. His acquisition of Twitter was controversial due to a subsequent increase in hate speech and the spread of misinformation on the service, following his pledge to decrease censorship. His role in the second Trump administration attracted public backlash, particularly in response to DOGE. The emails Musk sent to Jeffrey Epstein are included in the Epstein files, which were published in 2025 and 2026 and became a topic of worldwide debate.
-
+# ============================================================================
+# IMPLEMENTATION 1: Without LCEL (Simple Function-Based Approach)
+# Manual implementation of a retrieval chain
+# ============================================================================
+def retrieval_chain_without_lcel(query: str):
     """
+    Simple retrieval chain without LCEL.
+    Manually retrieves documents, formats them, and generates a response.
 
-
-
-    summary_template = """
-
-    Summarize the following {information} about a given person:
-
-    1. A short summary
-
-    2. two interesting facts about them
-
+    Limitations:
+    - Manual step-by-step execution
+    - No built-in streaming support
+    - No async support without additional code
+    - Harder to compose with other chains
+    - More verbose and error-prone
     """
+    # Step 1: Retrieve relevant documents
+    docs = retriever.invoke(query)
+
+    # Step 2: Format documents into context string
+    context = format_docs(docs)
+
+    # Step 3: Format the prompt with context and question
+    # This is a list of messages holding one message
+    messages = prompt_template.format_messages(context=context, question=query)
+
+    # Step 4: Invoke LLM with the formatted messages
+    response = llm.invoke(messages)
+
+    # Step 5: Return the content
+    return response.content
 
 
+# ============================================================================
+# IMPLEMENTATION 2: With LCEL (LangChain Expression Language) - BETTER APPROACH
+# ============================================================================
+def create_retrieval_chain_with_lcel():
+    """
+    Create a retrieval chain using LCEL (LangChain Expression Language).
+    Returns a chain that can be invoked with {"question": "..."}
 
-    summary_prompt_template = PromptTemplate(
-
-        input_variables=["information"],
-
-        template=summary_template,
-
+    Advantages over non-LCEL approach:
+    - Declarative and composable: Easy to chain operations with pipe operator (|)
+    - Built-in streaming: chain.stream() works out of the box
+    - Built-in async: chain.ainvoke() and chain.astream() available
+    - Batch processing: chain.batch() for multiple inputs
+    - Type safety: Better integration with LangChain's type system
+    - Less code: More concise and readable
+    - Reusable: Chain can be saved, shared, and composed with other chains
+    - Better debugging: LangChain provides better observability tools
+    """
+    retrieval_chain = (
+        # 先总结：RunnablePassthrough.assign = 透传原输入，并异步地（按链）算出若干新字段，合并进同一个 dict，专门用来在 RAG 里「在问题之外再挂上检索到的上下文」。
+        # RunnablePassthrough 表示「把输入原样往下传」。
+        # .assign(...) 的意思是：在保留原有输入的前提下，再往字典里多塞几个键，新键的值由你传入的 Runnable 算出来
+        RunnablePassthrough.assign(
+        # itemgetter("question") 表示从输入字典里取出 question 字符串,所以输入的 dic 里必须有这个 question field
+        # 再多一个键 context：
+        #   用 itemgetter("question") 从 dict 里取出 question 字符串；
+        #   交给 retriever → format_docs，得到检索后的文本；
+        #   把这段文字作为 context 的值。
+            context=itemgetter("question") | retriever | format_docs
+        )
+        | prompt_template
+        | llm
+        | StrOutputParser()
     )
-
-
-
-    # Azure OpenAI: set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT_NAME, and
-
-    # AZURE_OPENAI_API_KEY (or OPENAI_API_KEY). Optional: OPENAI_API_VERSION (defaults below).
-
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION") or os.getenv(
-        "OPENAI_API_VERSION", "2024-12-01-preview"
-    )
-
-    llm = AzureChatOpenAI(
-        temperature=0.6,
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        openai_api_key=os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
-        api_version=api_version,
-        model=os.getenv("AZURE_OPENAI_MODEL_NAME", "gpt-5.4-mini"),
-    )
-
-
-
-    # We are using something which is called the link chain expression language or LCL
-
-    # In this LCL syntax we create a chain by composing two components together, a prompt template and a language model and a large language model.
-
-    # The template is going to format input variables into a prompt string witch will eventually be propagated into the language model.
-
-    # And the llm variable is an AzureChatOpenAI object, which takes in an input prompt string and generates a text response.
-
-    # And this pipe operator | is going to create a new runnable chain object.
-
-    # So this is a new term runnable by connecting the output of the left component as an input to the right component.
-
-    chain = summary_prompt_template | llm
-
-    response = chain.invoke({"information": information})
-
-    print(response.content)
-
-
-
+    return retrieval_chain
 
 
 if __name__ == "__main__":
+    print("Retrieving...")
 
-    main()
+    query = "What is Pinecone in machine learning?"
 
+    # ========================================================================
+    # Option 0: Raw invocation without RAG
+    # ========================================================================
+    # print("\n" + "=" * 70)
+    # print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
+    # print("=" * 70)
+    # result_raw = llm.invoke([HumanMessage(content=query)])
+    # print("\nAnswer:")
+    # print(result_raw.content)
+
+
+    # ========================================================================
+    # Option 1: Use implementation WITHOUT LCEL
+    # ========================================================================
+    # print("\n" + "=" * 70)
+    # print("IMPLEMENTATION 1: Without LCEL")
+    # print("=" * 70)
+    # result_without_lcel = retrieval_chain_without_lcel(query)
+    # print("\nAnswer:")
+    # print(result_without_lcel)
+
+
+    # ========================================================================
+    # Option 2: Use implementation WITH LCEL (Better Approach)
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("IMPLEMENTATION 2: With LCEL - Better Approach")
+    print("=" * 70)
+    print("Why LCEL is better:")
+    print("- More concise and declarative")
+    print("- Built-in streaming: chain.stream()")
+    print("- Built-in async: chain.ainvoke()")
+    print("- Easy to compose with other chains")
+    print("- Better for production use")
+    print("=" * 70)
+
+    chain_with_lcel = create_retrieval_chain_with_lcel()
+    # 把问题作为输入字典的 question 字段，传给 chain_with_lcel  
+    result_with_lcel = chain_with_lcel.invoke({"question": query})
+    print("\nAnswer:")
+    print(result_with_lcel)
