@@ -1,233 +1,51 @@
-import os
-from operator import itemgetter
-from textwrap import dedent
-from operator import itemgetter
-from textwrap import dedent
-
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
 
+from langchain_core.messages import HumanMessage
+from langgraph.graph import MessagesState, StateGraph,END
+
+from nodes import run_agent_reasoning, tool_node
 
 load_dotenv()
 
-print("Initializing components...")
-
-embeddings = AzureOpenAIEmbeddings(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/"),
-    openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
-    openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-    azure_deployment=os.environ["AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT"],
-)
-
-llm = AzureChatOpenAI(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/"),
-    openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
-    openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-    azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
-)
-
-vector_store = PineconeVectorStore(
-    index_name=os.environ["INDEX_NAME"],
-    embedding=embeddings,
-)
-
-# 把向量库 vector_store 转换为一个符合 langChain 约定的 retriever 检索器对象
-retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-prompt_template = ChatPromptTemplate.from_messages(
-    [
-        (
-            "human",
-            dedent(
-                """
-                Answer the question based on the following context:
-
-                {context}
-
-                Question: {question}
-
-                Provide a detailed answer.
-                """
-            ).strip(),
-        ),
-    ]
-)
+# 注册/定义节点名称
+AGENT_REASON="agent_reason"
+ACT= "act"
+LAST = -1
 
 
-def format_docs(docs):
-    """Format the documents to a string"""
-    return "\n\n".join([doc.page_content for doc in docs])
+def should_continue(state: MessagesState) -> str:
+    # 在调用了 llm.invoke 生成消息后，如果最后一条消息带着 tools_calls 就返回 ACT ，没有 tool_calls，就返回 END
+    if not state["messages"][LAST].tool_calls:
+        return END
+    return ACT
 
+# 创建一个有状态的流程图，状态类型是 MessagesState，里面主要是 Messages 列表。
+# 这个状态图的作用是：根据当前的状态，决定下一步要执行哪个节点
+flow = StateGraph(MessagesState)
 
-# ============================================================================
-# IMPLEMENTATION 1: Without LCEL (Simple Function-Based Approach)
-# Manual implementation of a retrieval chain
-# ============================================================================
-def retrieval_chain_without_lcel(query: str):
-    """
-    Simple retrieval chain without LCEL.
-    Manually retrieves documents, formats them, and generates a response.
+# 每当走到这个节点（AGENT_REASON），就执行 run_agent_reasoning 函数
+flow.add_node(AGENT_REASON, run_agent_reasoning)
 
-    Limitations:
-    - Manual step-by-step execution
-    - No built-in streaming support
-    - No async support without additional code
-    - Harder to compose with other chains
-    - More verbose and error-prone
-    """
-    # Step 1: Retrieve relevant documents
-    docs = retriever.invoke(query)
+# 设置入口节点
+flow.set_entry_point(AGENT_REASON)
 
-    # Step 2: Format documents into context string
-    context = format_docs(docs)
+# 到 ACT 节点，就执行 tool_node 函数
+flow.add_node(ACT, tool_node)
 
-    # Step 3: Format the prompt with context and question
-    # This is a list of messages holding one message
-    messages = prompt_template.format_messages(context=context, question=query)
+# 设置条件边，先算一个函数 (should_continue) 根据返回值据欸的那个下一步是哪，如果是 END，就执行 END 节点，如果是 ACT，就执行 ACT 节点
+# 这里的 END 是 LangGraph 的常量，表示流程结束。
+flow.add_conditional_edges(AGENT_REASON, should_continue, {
+    END:END,
+    ACT:ACT
+})
 
-    # Step 4: Invoke LLM with the formatted messages
-    response = llm.invoke(messages)
+# 定义一个普通边，标识从 ACT 节点到 AGENT_REASON 节点的边, 没有分支
+flow.add_edge(ACT, AGENT_REASON)
 
-    # Step 5: Return the content
-    return response.content
-
-
-# ============================================================================
-# IMPLEMENTATION 2: With LCEL (LangChain Expression Language) - BETTER APPROACH
-# ============================================================================
-def create_retrieval_chain_with_lcel():
-    """
-    Create a retrieval chain using LCEL (LangChain Expression Language).
-    Returns a chain that can be invoked with {"question": "..."}
-
-    Advantages over non-LCEL approach:
-    - Declarative and composable: Easy to chain operations with pipe operator (|)
-    - Built-in streaming: chain.stream() works out of the box
-    - Built-in async: chain.ainvoke() and chain.astream() available
-    - Batch processing: chain.batch() for multiple inputs
-    - Type safety: Better integration with LangChain's type system
-    - Less code: More concise and readable
-    - Reusable: Chain can be saved, shared, and composed with other chains
-    - Better debugging: LangChain provides better observability tools
-    """
-    retrieval_chain = (
-        # 先总结：RunnablePassthrough.assign = 透传原输入，并异步地（按链）算出若干新字段，合并进同一个 dict，专门用来在 RAG 里「在问题之外再挂上检索到的上下文」。
-        # RunnablePassthrough 表示「把输入原样往下传」。
-        # .assign(...) 的意思是：在保留原有输入的前提下，再往字典里多塞几个键，新键的值由你传入的 Runnable 算出来
-        RunnablePassthrough.assign(
-        # itemgetter("question") 表示从输入字典里取出 question 字符串,所以输入的 dic 里必须有这个 question field
-        # 再多一个键 context：
-        #   用 itemgetter("question") 从 dict 里取出 question 字符串；
-        #   交给 retriever → format_docs，得到检索后的文本；
-        #   把这段文字作为 context 的值。
-            context=itemgetter("question") | retriever | format_docs
-        )
-        | prompt_template
-        | llm
-        | StrOutputParser()
-    )
-    return retrieval_chain
-
+app = flow.compile()
+app.get_graph().draw_mermaid_png(output_file_path="flow.png")
 
 if __name__ == "__main__":
-    print("Retrieving...")
-
-    query = "What is Pinecone in machine learning?"
-
-    # ========================================================================
-    # Option 0: Raw invocation without RAG
-    # ========================================================================
-    # print("\n" + "=" * 70)
-    # print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
-    # print("=" * 70)
-    # result_raw = llm.invoke([HumanMessage(content=query)])
-    # print("\nAnswer:")
-    # print(result_raw.content)
-
-
-    # ========================================================================
-    # Option 1: Use implementation WITHOUT LCEL
-    # ========================================================================
-    # print("\n" + "=" * 70)
-    # print("IMPLEMENTATION 1: Without LCEL")
-    # print("=" * 70)
-    # result_without_lcel = retrieval_chain_without_lcel(query)
-    # print("\nAnswer:")
-    # print(result_without_lcel)
-
-
-    # ========================================================================
-    # Option 2: Use implementation WITH LCEL (Better Approach)
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("IMPLEMENTATION 2: With LCEL - Better Approach")
-    print("=" * 70)
-    print("Why LCEL is better:")
-    print("- More concise and declarative")
-    print("- Built-in streaming: chain.stream()")
-    print("- Built-in async: chain.ainvoke()")
-    print("- Easy to compose with other chains")
-    print("- Better for production use")
-    print("=" * 70)
-
-    chain_with_lcel = create_retrieval_chain_with_lcel()
-    # 把问题作为输入字典的 question 字段，传给 chain_with_lcel  
-    result_with_lcel = chain_with_lcel.invoke({"question": query})
-    print("\nAnswer:")
-    print(result_with_lcel)
-    print("Retrieving...")
-
-    query = "What is Pinecone in machine learning?"
-
-    # ========================================================================
-    # Option 0: Raw invocation without RAG
-    # ========================================================================
-    # print("\n" + "=" * 70)
-    # print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
-    # print("=" * 70)
-    # result_raw = llm.invoke([HumanMessage(content=query)])
-    # print("\nAnswer:")
-    # print(result_raw.content)
-
-
-    # ========================================================================
-    # Option 1: Use implementation WITHOUT LCEL
-    # ========================================================================
-    # print("\n" + "=" * 70)
-    # print("IMPLEMENTATION 1: Without LCEL")
-    # print("=" * 70)
-    # result_without_lcel = retrieval_chain_without_lcel(query)
-    # print("\nAnswer:")
-    # print(result_without_lcel)
-
-
-    # ========================================================================
-    # Option 2: Use implementation WITH LCEL (Better Approach)
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("IMPLEMENTATION 2: With LCEL - Better Approach")
-    print("=" * 70)
-    print("Why LCEL is better:")
-    print("- More concise and declarative")
-    print("- Built-in streaming: chain.stream()")
-    print("- Built-in async: chain.ainvoke()")
-    print("- Easy to compose with other chains")
-    print("- Better for production use")
-    print("=" * 70)
-
-    chain_with_lcel = create_retrieval_chain_with_lcel()
-    # 把问题作为输入字典的 question 字段，传给 chain_with_lcel  
-    result_with_lcel = chain_with_lcel.invoke({"question": query})
-    print("\nAnswer:")
-    print(result_with_lcel)
+    print("Hello ReAct LangGraph with Function Calling")
+    res = app.invoke({"messages": [HumanMessage(content="What is the temperature in Tokyo? List it and then triple it")]})
+    print(res["messages"][LAST].content)
