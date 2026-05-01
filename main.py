@@ -1,51 +1,77 @@
+from typing import TypedDict, Annotated
+
 from dotenv import load_dotenv
-
-from langchain_core.messages import HumanMessage
-from langgraph.graph import MessagesState, StateGraph,END
-
-from nodes import run_agent_reasoning, tool_node
 
 load_dotenv()
 
-# 注册/定义节点名称
-AGENT_REASON="agent_reason"
-ACT= "act"
-LAST = -1
+from langchain_core.messages import BaseMessage, HumanMessage
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+
+from chains import generate_chain, reflect_chain
 
 
-def should_continue(state: MessagesState) -> str:
-    # 在调用了 llm.invoke 生成消息后，如果最后一条消息带着 tools_calls 就返回 ACT ，没有 tool_calls，就返回 END
-    if not state["messages"][LAST].tool_calls:
+class MessageGraph(TypedDict):
+    # 图的共享状态：messages 保存完整对话历史；add_messages 表示新消息会追加而不是覆盖。
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+REFLECT = "reflect"
+GENERATE = "generate"
+
+
+def generation_node(state: MessageGraph):
+    # 生成节点：把历史消息交给生成链，产出下一版 tweet。
+    return {"messages": [generate_chain.invoke({"messages": state["messages"]})]}
+
+
+def reflection_node(state: MessageGraph):
+    # 反思节点：根据目前历史生成 critique。
+    res = reflect_chain.invoke({"messages": state["messages"]})
+    # 包成 HumanMessage，让下一轮 generate 把 critique 当成“用户反馈”来改写。
+    return {"messages": [HumanMessage(content=res.content)]}
+
+
+# StateGraph 用 MessageGraph 作为状态结构，把函数节点连成可执行流程。
+builder = StateGraph(state_schema=MessageGraph)
+builder.add_node(GENERATE, generation_node)
+builder.add_node(REFLECT, reflection_node)
+builder.set_entry_point(GENERATE)
+
+
+def should_continue(state: MessageGraph):
+    # 用消息数量限制反思轮数，避免 generate <-> reflect 无限循环。
+    if len(state["messages"]) > 6:
         return END
-    return ACT
+    return REFLECT
 
-# 创建一个有状态的流程图，状态类型是 MessagesState，里面主要是 Messages 列表。
-# 这个状态图的作用是：根据当前的状态，决定下一步要执行哪个节点
-flow = StateGraph(MessagesState)
 
-# 每当走到这个节点（AGENT_REASON），就执行 run_agent_reasoning 函数
-flow.add_node(AGENT_REASON, run_agent_reasoning)
+# generate 后动态判断：继续反思，或结束。
+builder.add_conditional_edges(GENERATE, should_continue)
+# reflect 后固定回到 generate，形成“批评 -> 改写”的循环。
+builder.add_edge(REFLECT, GENERATE)
 
-# 设置入口节点
-flow.set_entry_point(AGENT_REASON)
-
-# 到 ACT 节点，就执行 tool_node 函数
-flow.add_node(ACT, tool_node)
-
-# 设置条件边，先算一个函数 (should_continue) 根据返回值据欸的那个下一步是哪，如果是 END，就执行 END 节点，如果是 ACT，就执行 ACT 节点
-# 这里的 END 是 LangGraph 的常量，表示流程结束。
-flow.add_conditional_edges(AGENT_REASON, should_continue, {
-    END:END,
-    ACT:ACT
-})
-
-# 定义一个普通边，标识从 ACT 节点到 AGENT_REASON 节点的边, 没有分支
-flow.add_edge(ACT, AGENT_REASON)
-
-app = flow.compile()
-app.get_graph().draw_mermaid_png(output_file_path="flow.png")
+graph = builder.compile()
+print(graph.get_graph().draw_mermaid())
+graph.get_graph().print_ascii()
 
 if __name__ == "__main__":
-    print("Hello ReAct LangGraph with Function Calling")
-    res = app.invoke({"messages": [HumanMessage(content="What is the temperature in Tokyo? List it and then triple it")]})
-    print(res["messages"][LAST].content)
+    print("Hello LangGraph")
+    inputs = {
+        "messages": [
+            HumanMessage(
+                content="""Make this tweet better:"
+                                    @LangChainAI
+            — newly Tool Calling feature is seriously underrated.
+
+            After a long wait, it's  here- making the implementation of agents across different models with function calling - super easy.
+
+            Made a video covering their newest blog post
+
+                                  """
+            )
+        ]
+    }
+    # invoke 会从入口节点开始执行整张图，直到走到 END。
+    response = graph.invoke(inputs)
+    print(response)
