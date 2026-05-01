@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "black>=26.3.1",
+    "grandalf>=0.8",
     "httpx-sse>=0.4.3",
     "isort>=8.0.1",
     "langchain>=1.2.15",
