@@ -1,77 +1,76 @@
-from typing import TypedDict, Annotated
+from typing import Literal
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import StateGraph, START, END, MessagesState
+from chains import revisor, first_responder
+from tool_executor import execute_tools_node
 
-from dotenv import load_dotenv
+# 定义最大迭代次数
+MAX_ITERATIONS = 2
 
-load_dotenv()
-
-from langchain_core.messages import BaseMessage, HumanMessage
-from langgraph.graph import END, StateGraph
-from langgraph.graph.message import add_messages
-
-from chains import generate_chain, reflect_chain
-
-
-class MessageGraph(TypedDict):
-    # 图的共享状态：messages 保存完整对话历史；add_messages 表示新消息会追加而不是覆盖。
-    messages: Annotated[list[BaseMessage], add_messages]
-
-
-REFLECT = "reflect"
-GENERATE = "generate"
+# 定义第一个 node, 用来 draft first answer. 入参是 MessagesState, 第一条信息会是用户输入的propt 也就是 HumanMessage
+# 这个 node 会调用 first_responder 链来生成第一个回答.
+def draft_node(state: MessagesState) -> MessagesState:
+    """Draft the initial response"""
+    # 给一个叫 messages 的 key, 值是 state["messages"]
+    response = first_responder.invoke({"messages": state["messages"]})
+    # Append the message to the state
+    return {"messages": [response]}
 
 
-def generation_node(state: MessageGraph):
-    # 生成节点：把历史消息交给生成链，产出下一版 tweet。
-    return {"messages": [generate_chain.invoke({"messages": state["messages"]})]}
+def revise_node(state: MessagesState) -> MessagesState:
+    """Revise the response"""
+    response = revisor.invoke({"messages": state["messages"]})
+    return {"messages": [response]}
 
-
-def reflection_node(state: MessageGraph):
-    # 反思节点：根据目前历史生成 critique。
-    res = reflect_chain.invoke({"messages": state["messages"]})
-    # 包成 HumanMessage，让下一轮 generate 把 critique 当成“用户反馈”来改写。
-    return {"messages": [HumanMessage(content=res.content)]}
-
-
-# StateGraph 用 MessageGraph 作为状态结构，把函数节点连成可执行流程。
-builder = StateGraph(state_schema=MessageGraph)
-builder.add_node(GENERATE, generation_node)
-builder.add_node(REFLECT, reflection_node)
-builder.set_entry_point(GENERATE)
-
-
-def should_continue(state: MessageGraph):
-    # 用消息数量限制反思轮数，避免 generate <-> reflect 无限循环。
-    if len(state["messages"]) > 6:
+# 这个是事件循环节点，用来决定是否继续执行 execute_tools 节点。 如果工具调用次数大于最大迭代次数，则结束整个流程。
+# 这里只为了学习，正常是应该由 LLM 来决定是否继续执行循环的
+def event_loop(state: MessagesState) -> Literal["execute_tools", END]:
+    """Determine whether to continue or end based on iteration count."""
+    # 统计工具调用次数，因为每次 Tool 调用都会往 state["messages"] 中添加一个 ToolMessage 类型，
+    # 所以可以统计 ToolMessage 类型出现的次数, 从而计算 loop 循环的次数
+    count_tool_visits = sum(
+        # item 是 ToolMessage 类型
+        isinstance(item, ToolMessage) for item in state["messages"]
+    )
+    # 真是运行后，在 LangSmith 里可以看到，实际运行了 execute_tools 3次，所以 3 > 2 才停下的
+    num_iterations = count_tool_visits
+    # 如果工具调用次数大于最大迭代次数，则结束整个流程。
+    if num_iterations > MAX_ITERATIONS:
         return END
-    return REFLECT
+    return "execute_tools"
 
 
-# generate 后动态判断：继续反思，或结束。
-builder.add_conditional_edges(GENERATE, should_continue)
-# reflect 后固定回到 generate，形成“批评 -> 改写”的循环。
-builder.add_edge(REFLECT, GENERATE)
+builder = StateGraph(MessagesState)
+builder.add_node("draft", draft_node)
+builder.add_node("execute_tools", execute_tools_node)
+builder.add_node("revise", revise_node)
+
+builder.add_edge(START, "draft")
+builder.add_edge("draft", "execute_tools")
+builder.add_edge("execute_tools", "revise")
+# 用 event_loop 函数判断，是走向 execute_tools_node 还是 END node ，如果返回 "execute_tools"，则继续执行 execute_tools_node；如果返回 END，则结束整个流程。
+builder.add_conditional_edges("revise", event_loop, ["execute_tools", END])
 
 graph = builder.compile()
+
+# 会在控制台打印出一段文字，贴到 mermaid live 网站去，就能生成一个调用链条
 print(graph.get_graph().draw_mermaid())
-graph.get_graph().print_ascii()
 
-if __name__ == "__main__":
-    print("Hello LangGraph")
-    inputs = {
+res = graph.invoke(
+    {
+        # 这个信息会被放到 MessagesPlaceholder(variable_name="messages") 中，比如 actor_prompt_template 里
+        # 然后会被拼成 "SystemMessage:... 下面是从外面传进来的 messages"
         "messages": [
-            HumanMessage(
-                content="""Make this tweet better:"
-                                    @LangChainAI
-            — newly Tool Calling feature is seriously underrated.
-
-            After a long wait, it's  here- making the implementation of agents across different models with function calling - super easy.
-
-            Made a video covering their newest blog post
-
-                                  """
-            )
+            {
+                "role": "user",
+                "content": "Write about AI-Powered SOC / autonomous soc problem domain, list startups that do that and raised capital."
+            }
         ]
     }
-    # invoke 会从入口节点开始执行整张图，直到走到 END。
-    response = graph.invoke(inputs)
-    print(response)
+)
+
+
+last_message = res["messages"][-1]
+# 如果最后一个信息是 AIMessage 类型且有 tool_calls 属性
+if isinstance(last_message, AIMessage) and last_message.tool_calls:
+    print(last_message.tool_calls[0]["args"]["answer"])
