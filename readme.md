@@ -1,11 +1,13 @@
-# Reflexion Agent
+# Agentic RAG
 
-## Beyond Reflection Agent
+## A demo of RAG with LangGraph
 
-### Difference between the Reflection Agent branch?
+### steps
 
-In this branch, we will use Tavily, a search Engine. 
+1. Fetch documents from given URLs
+2. Ingest them into a vector store
+3. Retrieve relevant documents with the user question
+4. Grade the retrieved documents if they are relevant
+5. Do web search if no document is relevant
+6. Generate and output the final answer
 
-### What is schemas.py file for ?
-
-This file is going to hold the schemas for the output we want.
