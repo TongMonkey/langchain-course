@@ -16,6 +16,7 @@ dependencies = [
     "langchain-openai>=1.1.12",
     "langchain-tavily>=0.2.17",
     "langchain-text-splitters>=1.1.2",
+    "langsmith>=0.7.37",
     "poetry>=2.3.4",
     "pytest>=9.0.3",
     "python-dotenv>=1.2.2",

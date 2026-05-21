@@ -40,15 +40,15 @@ embeddings = AzureOpenAIEmbeddings(
 # 建库/写入数据库: 把小块存储到向量数据库中(磁盘上), 所以这里的 vectorstore 是 Chroma 对象
 # 第一次执行后，之后再执行，会往这个相同的 persist_directory 中写入数据，覆盖掉原来的数据
 # 所以后来注释掉了(项目文件夹下有了.chroma文件夹)，retriver 会从本地读取数据，如果删了.chroma文件夹，就需要重新建库
-# vectorstore = Chroma.from_documents(
-#     documents=doc_splits,
-#     # 给数据库里这组数据起个名字
-#     collection_name="rag-chroma",
-#     # 用什么 embedding 模型来把每个文本块转化成向量，再存起来
-#     embedding=embeddings,
-#     # 添加参数：存储在哪，相对于 root 目录的相对路径
-#     persist_directory="./.chroma",
-# )
+vectorstore = Chroma.from_documents(
+    documents=doc_splits,
+    # 给数据库里这组数据起个名字
+    collection_name="rag-chroma",
+    # 用什么 embedding 模型来把每个文本块转化成向量，再存起来
+    embedding=embeddings,
+    # 添加参数：存储在哪，相对于 root 目录的相对路径
+    persist_directory="./.chroma",
+)
 
 # 创建 retriever 检索器对象. 
 # Chroma 对象本身是向量数据库对象，用来打开/读取已有向量库
