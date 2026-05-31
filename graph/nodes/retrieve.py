@@ -2,7 +2,8 @@
 
 from typing import Dict, Any
 from graph.state import GraphState
-from ingestion import retriever, vectorstore
+# from ingestion import retriever, vectorstore
+from ingestion import retriever
 
 # 返回一个字典，用于更新 state
 def retrieve(state: GraphState) -> Dict[str, Any]:
