@@ -1,16 +1,13 @@
-# Self RAG
+# Adaptive RAG
 
 ## Objective
 
-在分支 project/xxt-agentic-rag-graph 的基础上，在实现了一个 RAG 的基础上，再添加一个 reflection, 用于检查当前生成的答案 is hallucinated or not. 答案是否产生了幻觉。
+在分支 project/xxt-self-rag 的基础上，添加一个问题导航功能，简单来说，就是用一个 question router to route question to different RAG flows.
+所以改变之前的逻辑为:
+判断用户的问题在 vector store 中是否已经存在，如果有，就直接 rag 查询,走向 retrieve node；否则就去 web search，走向 websearch node.
 
 ### Roles
 
-- hallucination_grader chain 
-- answer_grader chain
-- graph_app.py 调度者，在这里添加 conditional edge
+question_router.py chain 
+conditional entry: conditional edge with the first node of the entry point
 
-#### hallucination_grader.py
-
-A chain to determine whether the answer we get back from LLM, the generation is grounded in the documents.
-创建一个 chain，用来判断 LLM 生成的答案，是否真的基于检索到的 documents，而不是模型自己编出来的。

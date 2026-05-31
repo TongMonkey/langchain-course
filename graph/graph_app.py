@@ -3,6 +3,7 @@
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 
+from graph.chains.question_router import question_router
 from graph.chains.answer_grader import answer_grader
 from graph.chains.hallucination_grader import hallucination_grader
 from graph.consts import *
@@ -14,12 +15,12 @@ load_dotenv()
 # 用来判断条件边的函数们：
 def deside_to_generate(state: GraphState) -> bool:
     if state['web_search']:
-        return WEBSEARCH
+        return WEBSEARCH_CONST
     else:
-        return GENERATE
+        return GENERATE_CONST
 
 
-# 用 useful 和 not useful 来判断 generation 是否有用，从而决定要走向哪个 node: WEBSEARCH 或 END
+# 用 useful 和 not useful 来判断 generation 是否有用，从而决定要走向哪个 node: WEBSEARCH_CONST 或 END
 # 用 "not supported" 来判断要不要重新生成答案
 def grade_generation_grounded_in_documents_and_question(state: GraphState) -> str:
 
@@ -46,39 +47,60 @@ def grade_generation_grounded_in_documents_and_question(state: GraphState) -> st
         return "not supported"
 
 
+def route_question(state: GraphState) -> str:
+    print("----ROUTE QUESTION----")
+    question = state['question']
+    router_output = question_router.invoke({"question": question})
+    if router_output.datasource == "vector_store":
+        print("----DECISION: Route question to vector store----")
+        return RETRIEVE_CONST
+    else:
+        print("----DECISION: Route question to web search----")
+        return WEBSEARCH_CONST
+
+
 
 # 创建工作流图, 用来连接各个节点和边
 workflow = StateGraph(GraphState)
 
-workflow.add_node(RETRIEVE, retrieve)
-workflow.add_node(GRADE_DOCUMENTS, grade_documents)
-workflow.add_node(GENERATE, generate)
-workflow.add_node(WEBSEARCH, web_search)
+workflow.add_node(RETRIEVE_CONST, retrieve)
+workflow.add_node(GRADE_DOCUMENTS_CONST, grade_documents)
+workflow.add_node(GENERATE_CONST, generate)
+workflow.add_node(WEBSEARCH_CONST, web_search)
 
-workflow.add_edge(START, RETRIEVE) # 跟 workflow.set_entry_point(RETRIEVE) 一样
-workflow.add_edge(RETRIEVE, GRADE_DOCUMENTS)
+# 添加 conditional entry point, 用来根据 question 路由到不同的 node
+workflow.set_conditional_entry_point(
+    route_question,
+    {
+        RETRIEVE_CONST: RETRIEVE_CONST,
+        WEBSEARCH_CONST: WEBSEARCH_CONST
+    }
+)
+# 这行要删掉了，因为已经用 conditional entry point 代替了
+# workflow.add_edge(START, RETRIEVE_CONST) # 跟 workflow.set_entry_point(RETRIEVE_CONST) 一样
+workflow.add_edge(RETRIEVE_CONST, GRADE_DOCUMENTS_CONST)
 
 workflow.add_conditional_edges(
-    GRADE_DOCUMENTS, 
+    GRADE_DOCUMENTS_CONST, 
     deside_to_generate, 
     {
-        WEBSEARCH: GENERATE,
-        GENERATE: GENERATE
+        WEBSEARCH_CONST: GENERATE_CONST,
+        GENERATE_CONST: GENERATE_CONST
     }
 )
 
 workflow.add_conditional_edges(
-    GENERATE,
+    GENERATE_CONST,
     grade_generation_grounded_in_documents_and_question,
     {
         "useful": END,
-        "not useful": WEBSEARCH,
-        "not supported": GENERATE
+        "not useful": WEBSEARCH_CONST,
+        "not supported": GENERATE_CONST
     }
 )
 
-workflow.add_edge(WEBSEARCH, GENERATE)
-workflow.add_edge(GENERATE, END)
+workflow.add_edge(WEBSEARCH_CONST, GENERATE_CONST)
+workflow.add_edge(GENERATE_CONST, END)
 
 app = workflow.compile()
 
